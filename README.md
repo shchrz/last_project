@@ -26,3 +26,8 @@ On the Client's computer, a driver that will act like an actual camera is connec
     
 ## Flow
 ![image](https://user-images.githubusercontent.com/109152620/236700142-79148267-5968-4409-94ec-44af06831542.png)
+## Requirements
+* Python <= 3.8.11
+    * All libraries in requirements.txt
+* Windows Computer with a camera and the server software
+* Windows Computer with the client software
