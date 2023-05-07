@@ -17,6 +17,9 @@ A standard camera or webcam is connected to the server's computer.
 
 ### Protocol
 The protocol will be UDP based. It will have a safe mechanism to find if a packet has gone missing or got corrupted. It will be fast and reliable.
+![image](https://user-images.githubusercontent.com/109152620/236707135-a2c16886-2fec-4328-aa5e-94ee817b811f.png)
+
+
 
 ### Client
 The client application will have a user interface that allows users to find and connect to a server-side service. The client program will send a broadcast packet, which the server-side service will catch and respond to enable the client to establish a connection.
