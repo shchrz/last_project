@@ -1,6 +1,6 @@
 # EasyLence
 
-
+Overall, this project will allow a user to use a webcam remotely. For example, imagine you have a camera connected to a computer with the server service running on it, and you want to use it with Zoom on a different computer, so you fire up the client, connect to your server, start the Virtual camera and use it as a regular camera in your Zoom application.
 ## Basic Design
 ![image](https://user-images.githubusercontent.com/109152620/236695505-12707c1a-d5b0-420b-bc4e-01c91fc5bbb8.png)
 
@@ -24,4 +24,5 @@ An interactive User interface to start and use the client, the interface will ha
 ### Virtual Camera
 On the Client's computer, a driver that will act like an actual camera is connected but will send video directed to it.
     
+## Flow
 ![image](https://user-images.githubusercontent.com/109152620/236700142-79148267-5968-4409-94ec-44af06831542.png)
