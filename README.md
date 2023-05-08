@@ -36,20 +36,41 @@ On the client side, a virtual camera is essentially a software driver that emula
 
 ![image](https://user-images.githubusercontent.com/109152620/236920960-a5d865ae-9c9c-4347-95f3-c8a90ef8ba17.png)
 
-* The Cookie is an id method for the Protocol an id of 0x16f5f7a7 was choosen.
-* CRC is the CRC32 algorithem to check for courppted packet.
-* Flags
-    * Version - Number created with Bits 1 to 4
-    * First Chunk - Bit 5 is on 
-    * Last Chunk - Bit 6 is on
-    * FEC - Bit 7 is on
-    * Bit 8 is always off
-* Index of Chunk is the place in the frame order from that chunk belongs. 0 when First Chunk flag is on
-* Frame Serial is a 2 byte number that all the chunks from the same frame share and can be identifi with.
-* Chunk Data Length is for removing the padding on the last chunk
-* Payload Length is for determining how much after it is the Payload. 0 means theres no Payload. The Length must be a multipcation of 2 bytes.
-* Payload is for adding additonal data to a chunk thats not the frames data. when First Chunk flag is on the payload will contain a CRC of the full frame.
-* The actuall frame data starts on a new word if stops before the end of a word padding will be added
+### Cookie
+The "Cookie" is an identification method for the protocol. The ID is 0x16f5f7a7.
+
+### CRC
+"CRC" is the CRC32 algorithm to check for corrupted packets.
+
+### Flags
+An 8-bit number that represents the Protocol version, chunk order flags, and FEC.
+The 8th bit always equals 0.
+
+         1 2 3 4 5 6 7 8
+        +--+--+-+-+-+-+-+
+        |V|V|V|V|C|C|F|0|
+        |4|3|2|1|2|1|1|0|
+        +--+--+-+-+-+-+-+
+        
+V - Version bits that makes the version number.
+C - Chunk Order bits 10 to signal first Chunk and 01 to signal last Chunk.
+F - FEC bit if on FEC is on
+
+### Index of Chunk
+Index of Chunk is the Chunk's location in the order. When the Chunk Order bits are 10 equals 0.
+
+### Frame Serial
+Frame Serial is a 2-byte number that all the Chunks from the same frame share and can be identified with. It is required for reconstructing the frame.
+
+### Chunk Data Length
+"Chunk Data Length" is the length of the data in the Chunk, used for removing the padding on the last Chunk.
+
+### Payload Length & Payload
+Payload Length is for determining how much after it is the Payload. 0 means no Payload. The length must be a multiplication of 2.
+Payload is for adding additional information to a chunk. When the "First Chunk" flag is on, the Payload will contain a "CRC" of the entire frame.
+
+### Data
+The data starts on a new byte after the Payload. It is aligned on 16-bit boundaries. If the data size doesn't allow for alignment, padding it to be added at the end.
     
 ## Flow
 ![image](https://user-images.githubusercontent.com/109152620/236700142-79148267-5968-4409-94ec-44af06831542.png)
