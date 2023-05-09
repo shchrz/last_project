@@ -48,13 +48,14 @@ The 8th bit always equals 0.
 
          1 2 3 4 5 6 7 8
         +--+--+-+-+-+-+-+
-        |V|V|V|V|C|C|F|0|
-        |4|3|2|1|2|1|1|0|
+        |V|V|V|V|C|C|F|E|
+        |3|2|1|0|1|0|0|0|
         +--+--+-+-+-+-+-+
         
 V - Version bits that makes the version number.
 C - Chunk Order bits 10 to signal first Chunk and 01 to signal last Chunk.
 F - FEC bit if on FEC is on
+E - ChaCha20 bit if on the packet is encrypted using ChaCha2
 
 ### Index of Chunk
 Index of Chunk is the Chunk's location in the order. When the Chunk Order bits are 10 equals 0.
