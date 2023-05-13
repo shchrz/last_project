@@ -66,24 +66,29 @@ def send_frames(sock, addr):
 
     demo = build_demo(demo_data)
 
-    sock.setblocking(0)
+    fps = 15
     data = b""
     start_time = time.time()
     while True:
         try:
+            sock.setblocking(0)
             data = sock.recvfrom(CHUNK)[0]
             if data:
                 break
         except:
-            sock.sendto(demo,addr)
-            INDEX += 1
+            
+            sock.setblocking(1)
+            for i in range(36):
+                time.sleep(1.0/(fps*38))
+                sock.sendto(demo,addr)
+                INDEX += 1
 
     data = int.from_bytes(data, byteorder="big", signed=False)
 
     print("Chunks per second: ", INDEX / (time.time() - start_time))
-    print("Frames Sent: ", INDEX)
-    print("Frames Recived: ", data)
-    print("Precent of Frames Recived: ", (float(data)/INDEX)*100, "%")
+    print("Chunks Sent: ", INDEX)
+    print("Chunks Recived: ", data)
+    print("Precent of Chunks Recived: ", (float(data)/INDEX)*100, "%")
 
 def build_demo(data):
     CRC = binascii.crc32(data).to_bytes(4, byteorder="big", signed=False)
