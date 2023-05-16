@@ -7,6 +7,79 @@ from threading import Lock
 from constents import *
 
 
+class Analytics:
+    def __init__(self) -> None:
+        self.packets_sent = 0
+        self.packets_received = 0
+        self.frames_sent = 0
+        self.frames_received = 0
+        self.init_time = time.time()
+
+    def reset(self):
+        self.__init__()
+
+    def add_packets_sent(self, amount=1):
+        self.packets_sent += amount
+
+    def add_packets_received(self, amount):
+        self.packets_received += amount
+
+    def set_packets_received(self, amount):
+        self.packets_received = amount
+
+    def add_frames_sent(self, amount=1):
+        self.frames_sent += amount
+
+    def add_frames_received(self, amount):
+        self.frames_received += amount
+
+    def set_frames_received(self, amount):
+        self.frames_received = amount
+
+    def get_packets_sent(self) -> int:
+        return self.packets_sent
+
+    def get_packets_received(self) -> int:
+        return self.packets_received
+
+    def get_frames_sent(self) -> int:
+        return self.frames_sent
+
+    def get_frames_received(self) -> int:
+        return self.frames_received
+
+    def get_packet_lost(self):
+        return float(self.packets_received) / self.packets_sent * 100
+
+    def get_frame_lost(self):
+        return float(self.frames_received) / self.frames_sent * 100
+
+    def get_bitrate(self):
+        return (
+            float(self.packets_sent * PACKET_SIZE * 8)
+            / (time.time() - self.init_time)
+            / 1000000
+        )
+
+    def get_received_framerate(self):
+        return float(self.frames_received) / (time.time() - self.init_time)
+
+    def get_sent_framerate(self):
+        return float(self.frames_sent) / (time.time() - self.init_time)
+
+    def to_string(self) -> str:
+        return "Packet Loss: {}%, Frame Loss: {}%, Bitrate: {} Mbit/s, Received FPS: {}, Sent FPS: {}".format(
+            self.get_packet_lost(),
+            self.get_frame_lost(),
+            self.get_bitrate(),
+            self.get_received_framerate(),
+            self.get_sent_framerate(),
+        )
+
+    def __str__(self) -> str:
+        return self.to_string()
+
+
 class Packet:
     def __init__(self, param):
         if type(param) == tuple:
@@ -190,6 +263,9 @@ class Data:
     def get_CRC(self):
         return self.CRC
 
+    def get_size(self):
+        return self.size
+
     def get_data(self):
         return self.raw
 
@@ -228,7 +304,15 @@ class PacketList:
 
 
 class Agent:
-    def __init__(self, sock, fps=15, FEC_flag=FEC_OFF_FLAG, SEC_flag=SEC_OFF_FLAG):
+    def __init__(
+        self,
+        sock,
+        fps=15,
+        FEC_flag=FEC_OFF_FLAG,
+        SEC_flag=SEC_OFF_FLAG,
+        key=None,
+        analytics=Analytics(),
+    ):
         self.FEC_flag = FEC_flag
         self.SEC_flag = SEC_flag
         self.data_serial = np.uint16(0)
@@ -237,17 +321,20 @@ class Agent:
         self.fps = fps
         self.data_dict = dict()
         self.lock = Lock()
+        self.key = key
+        self.analytics = analytics
 
     def send_data(self, data: Data, addr):  # Server-side
         logging.debug("Sending {} to {}".format(data, addr))
         self.addr = addr  # (ip,port)
-        packet_spacing = 1.0 / (self.fps * PACKETS_PER_FARME)
+        packet_spacing = 1.0 / (self.fps * (round(data.get_size() / PACKET_SIZE) + 2))
         index = np.uint8(0)
         while not data.is_end():
             self._send_packet(self._create_packet(index, data))
             index += np.uint8(1)
             time.sleep(packet_spacing)
         self._increase_serial()
+        self.analytics.add_frames_sent()
 
     def _increase_serial(self):
         if self.data_serial == 65535:
@@ -287,8 +374,10 @@ class Agent:
 
     def _send_packet(self, packet: Packet):  # Agent-side
         self.sock.sendto(packet.get_raw(), self.addr)
+        self.analytics.add_packets_sent()
 
     def start_receive(self):
+        print("started start_receive")
         # dict serials for keys and list/sets of packets orderby index
         self.RUN = True
         while self.RUN:
@@ -335,6 +424,7 @@ class Agent:
         for i in list(self.data_dict.keys()):  # iter(self.data_dict):
             if self.data_dict[i].is_complete():
                 completed.append(int(i))
+                self.analytics.add_frames_received()
         self.lock.release()
         if not completed:
             return Data(b"")
