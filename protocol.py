@@ -1,6 +1,7 @@
 import binascii
 import time
 import logging
+import socket
 import numpy as np
 
 from threading import Lock
@@ -59,11 +60,18 @@ class Analytics:
     def get_good_frames(self) -> int:
         return self.good_frames
 
+    def get_packet_CRC(self):
+        return self.packets_CRC_error
+
     def get_packet_lost(self):
         return float(self.packets_received) / self.packets_sent * 100
 
     def get_packet_CRC_error(self):
-        return float(self.packets_CRC_error) / self.packets_received * 100
+        return (
+            (float(self.packets_CRC_error) / self.packets_received * 100)
+            if self.packets_CRC_error != 0
+            else 0
+        )
 
     def get_frame_lost(self):
         return float(self.frames_received) / self.frames_sent * 100
@@ -182,6 +190,9 @@ class Packet:
         self.Raw[COOKIE_SIZE : COOKIE_SIZE + CRC_SIZE] = self.CRC.tobytes()  # CRC
 
     def decode(self) -> None:
+        if self.Raw == b"":
+            return
+
         read_bytes = 0
         self.Cookie = np.frombuffer(self.Raw[:COOKIE_SIZE], dtype=np.uint32)[0]
 
@@ -289,6 +300,9 @@ class Data:
     def get_size(self):
         return self.size
 
+    def clone(self):
+        return Data(self.raw)
+
     def __str__(self) -> str:
         return "{}...{}".format(str(self.raw[:16]), str(self.raw[-17:]))
 
@@ -303,11 +317,11 @@ class PacketList:
     def add_packet(self, packet: Packet):
         self.packets[str(packet.get_index())] = packet
         if packet.is_last():
-            self.num_of_packets = int(packet.get_index())
+            self.num_of_packets = int(packet.get_index()) + 1
 
     def is_complete(self) -> bool:
         if self.num_of_packets > -1:
-            return self.num_of_packets == len(self.packets) - 1
+            return self.num_of_packets == len(self.packets)
         return False
 
     def get_packet(self, index) -> Packet:
@@ -324,27 +338,55 @@ class PacketList:
 
 
 class Agent:
-    def __init__(self, sock, fps=15, FEC_flag=FEC_OFF_FLAG, SEC_flag=SEC_OFF_FLAG):
+    def __init__(
+        self,
+        udp_sock,
+        tcp_sock,
+        addr,
+        fps=15,
+        FEC_flag=FEC_OFF_FLAG,
+        SEC_flag=SEC_OFF_FLAG,
+    ):
         self.FEC_flag = FEC_flag
         self.SEC_flag = SEC_flag
         self.data_serial = np.uint16(0)
         self.RUN = False
-        self.sock = sock
+        self.udp_sock = udp_sock
+        self.tcp_sock = tcp_sock
+        self.addr = addr
         self.fps = fps
         self.data_dict = dict()
         self.lock = Lock()
         self.analytics = Analytics()
 
-    def send_data(self, data: Data, addr):  # Server-side
+    def is_tcp_socket_closed(self) -> bool:
+        try:
+            # this will try to read bytes without blocking and also without removing them from buffer (peek only)
+            data = self.tcp_sock.recv(16, socket.MSG_PEEK)
+            if len(data) == 0:
+                return True
+        except BlockingIOError:
+            return False  # socket is open and reading from it would block
+        except ConnectionResetError:
+            return True  # socket was closed for some other reason
+        except Exception as e:
+            self.logger.exception(
+                "unexpected exception when checking if a socket is closed"
+            )
+            return False
+        return False
+
+    def is_alive(self) -> bool:
+        return not self.is_tcp_socket_closed()
+
+    def send_data(self, data: Data):  # Server-side
         # logging.debug("Sending {} to {}".format(data, addr))
         self.analytics.add_frames_sent()
-        self.addr = addr  # (ip,port)
-        packet_spacing = 1.0 / (self.fps * round(data.get_size() / PACKET_SIZE + 10))
         index = np.uint8(0)
         while not data.is_end():
             self._send_packet(self._create_packet(index, data))
             index += np.uint8(1)
-            time.sleep(0.002)  # packet_spacing)
+            time.sleep(0.001)  # packet_spacing)
 
         self._increase_serial()
 
@@ -385,15 +427,18 @@ class Agent:
         )
 
     def _send_packet(self, packet: Packet):  # Agent-side
-        self.sock.sendto(packet.get_raw(), self.addr)
+        self.udp_sock.sendto(packet.get_raw(), self.addr)
         self.analytics.add_packets_sent()
 
     def start_receive(self):
         # dict serials for keys and list/sets of packets orderby index
         self.RUN = True
         while self.RUN:
-            packet = self._receive_packet()
+            is_full, packet = self._receive_packet()
             # logging.debug("Received {}".format(packet))
+            if not is_full:
+                continue
+
             if not packet.is_valid():
                 self.analytics.add_packets_CRC_error()
                 continue
@@ -425,11 +470,15 @@ class Agent:
     def stop_receive(self):
         self.RUN = False
 
-    def _receive_packet(self) -> Packet:  # Client-side
+    def _receive_packet(self):  # Client-side
         # receive packet via sock
-        data = self.sock.recvfrom(PACKET_SIZE)[0]
-        self.analytics.add_packets_received()
-        return Packet(data)
+        try:
+            data = self.udp_sock.recvfrom(PACKET_SIZE)[0]
+            self.analytics.add_packets_received()
+            return True, Packet(data)
+        except Exception as ex:
+            pass
+        return False, Packet(b"")
 
     def get_last_data(self) -> Data:
         # return the data with the largest serial number
