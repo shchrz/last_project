@@ -11,8 +11,10 @@ class Analytics:
     def __init__(self) -> None:
         self.packets_sent = 0
         self.packets_received = 0
+        self.packets_CRC_error = 0
         self.frames_sent = 0
         self.frames_received = 0
+        self.good_frames = 0
         self.init_time = time.time()
 
     def reset(self):
@@ -21,17 +23,23 @@ class Analytics:
     def add_packets_sent(self, amount=1):
         self.packets_sent += amount
 
-    def add_packets_received(self, amount):
+    def add_packets_received(self, amount=1):
         self.packets_received += amount
 
     def set_packets_received(self, amount):
         self.packets_received = amount
 
+    def add_packets_CRC_error(self, amount=1):
+        self.packets_CRC_error += amount
+
     def add_frames_sent(self, amount=1):
         self.frames_sent += amount
 
-    def add_frames_received(self, amount):
+    def add_frames_received(self, amount=1):
         self.frames_received += amount
+
+    def add_good_frames(self, amount=1):
+        self.good_frames += amount
 
     def set_frames_received(self, amount):
         self.frames_received = amount
@@ -48,11 +56,23 @@ class Analytics:
     def get_frames_received(self) -> int:
         return self.frames_received
 
+    def get_good_frames(self) -> int:
+        return self.good_frames
+
     def get_packet_lost(self):
         return float(self.packets_received) / self.packets_sent * 100
 
+    def get_packet_CRC_error(self):
+        return float(self.packets_CRC_error) / self.packets_received * 100
+
     def get_frame_lost(self):
         return float(self.frames_received) / self.frames_sent * 100
+
+    def get_bits_sent(self):
+        return self.packets_sent * PACKET_SIZE * 8
+
+    def get_bits_received(self):
+        return self.packets_received * PACKET_SIZE * 8
 
     def get_bitrate(self):
         return (
@@ -263,11 +283,11 @@ class Data:
     def get_CRC(self):
         return self.CRC
 
-    def get_size(self):
-        return self.size
-
     def get_data(self):
         return self.raw
+
+    def get_size(self):
+        return self.size
 
     def __str__(self) -> str:
         return "{}...{}".format(str(self.raw[:16]), str(self.raw[-17:]))
@@ -304,15 +324,7 @@ class PacketList:
 
 
 class Agent:
-    def __init__(
-        self,
-        sock,
-        fps=15,
-        FEC_flag=FEC_OFF_FLAG,
-        SEC_flag=SEC_OFF_FLAG,
-        key=None,
-        analytics=Analytics(),
-    ):
+    def __init__(self, sock, fps=15, FEC_flag=FEC_OFF_FLAG, SEC_flag=SEC_OFF_FLAG):
         self.FEC_flag = FEC_flag
         self.SEC_flag = SEC_flag
         self.data_serial = np.uint16(0)
@@ -321,20 +333,20 @@ class Agent:
         self.fps = fps
         self.data_dict = dict()
         self.lock = Lock()
-        self.key = key
-        self.analytics = analytics
+        self.analytics = Analytics()
 
     def send_data(self, data: Data, addr):  # Server-side
-        logging.debug("Sending {} to {}".format(data, addr))
+        # logging.debug("Sending {} to {}".format(data, addr))
+        self.analytics.add_frames_sent()
         self.addr = addr  # (ip,port)
-        packet_spacing = 1.0 / (self.fps * (round(data.get_size() / PACKET_SIZE) + 2))
+        packet_spacing = 1.0 / (self.fps * round(data.get_size() / PACKET_SIZE + 10))
         index = np.uint8(0)
         while not data.is_end():
             self._send_packet(self._create_packet(index, data))
             index += np.uint8(1)
-            time.sleep(packet_spacing)
+            time.sleep(0.002)  # packet_spacing)
+
         self._increase_serial()
-        self.analytics.add_frames_sent()
 
     def _increase_serial(self):
         if self.data_serial == 65535:
@@ -377,24 +389,25 @@ class Agent:
         self.analytics.add_packets_sent()
 
     def start_receive(self):
-        print("started start_receive")
         # dict serials for keys and list/sets of packets orderby index
         self.RUN = True
         while self.RUN:
             packet = self._receive_packet()
-            logging.debug("Received {}".format(packet))
+            # logging.debug("Received {}".format(packet))
             if not packet.is_valid():
+                self.analytics.add_packets_CRC_error()
                 continue
             serial = packet.get_serial()
             if str(serial) in self.data_dict:
-                logging.debug("Adding {} to {}".format(packet, serial))
+                # logging.debug("Adding {} to {}".format(packet, serial))
                 self.data_dict[str(serial)].add_packet(packet)
-                logging.debug("Added")
+                # logging.debug("Added")
             else:
-                logging.debug(
-                    "Adding {} with {} key to {}".format(packet, serial, self.data_dict)
-                )
+                # logging.debug(
+                #    "Adding {} with {} key to {}".format(packet, serial, self.data_dict)
+                # )
                 self.data_dict[str(serial)] = PacketList(packet)
+                self.analytics.add_frames_received()
                 logging.debug("Added both")
 
             self._clean_up()
@@ -415,6 +428,7 @@ class Agent:
     def _receive_packet(self) -> Packet:  # Client-side
         # receive packet via sock
         data = self.sock.recvfrom(PACKET_SIZE)[0]
+        self.analytics.add_packets_received()
         return Packet(data)
 
     def get_last_data(self) -> Data:
@@ -424,14 +438,18 @@ class Agent:
         for i in list(self.data_dict.keys()):  # iter(self.data_dict):
             if self.data_dict[i].is_complete():
                 completed.append(int(i))
-                self.analytics.add_frames_received()
+
         self.lock.release()
         if not completed:
-            return Data(b"")
+            return Data(b""), -1
 
         serial = max(completed)
         if serial <= self.data_serial:
-            return Data(b"")
+            return Data(b""), -1
 
+        self.analytics.add_good_frames()
         self.data_serial = serial
-        return self.data_dict[str(self.data_serial)].to_data()
+        return self.data_dict[str(self.data_serial)].to_data(), serial
+
+    def get_analytics(self):
+        return self.analytics
