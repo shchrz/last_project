@@ -1,14 +1,13 @@
 import pyvirtualcam
 import cv2
 import socket
-import binascii
-import logging, logging.handlers
+import logging
 import time
 import signal
 import numpy as np
-import tkinter as tk
 from threading import Thread, Lock
-from protocol import Agent, Data
+from Crypto.Hash import SHA256
+from protocol import Agent
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +17,30 @@ class Client:
         self,
         addr=("127.0.0.1", 20001),
         output_camera=False,
-        fps=30,
+        fps=15,
         res_h=720,
         res_w=1280,
         RUN=True,
+        FEC_Flag=False,
+        SEC_Flag=False,
+        password=None,
     ):
+        """
+        Initialize the Client instance.
+
+        Args:
+            addr (tuple, optional): Server address. Defaults to ("127.0.0.1", 20001).
+            output_camera (bool, optional): Flag to output frames to a virtual camera. Defaults to False.
+            fps (int, optional): Frames per second. Defaults to 15.
+            res_h (int, optional): Resolution height. Defaults to 720.
+            res_w (int, optional): Resolution width. Defaults to 1280.
+            RUN (bool, optional): Flag to control the main loop. Defaults to True.
+            FEC_Flag (bool, optional): Flag to enable Forward Error Correction. Defaults to False.
+            SEC_Flag (bool, optional): Flag to enable Secure End-to-End Communication. Defaults to False.
+            password (str, optional): Password for Secure End-to-End Communication. Defaults to None.
+        """
+
+        # Initialize instance variables
         self.fps = fps
         self.res_h = res_h
         self.res_w = res_w
@@ -30,137 +48,181 @@ class Client:
         self.addr = addr
         self.lock = Lock()
         self.agent = None
+        self.FEC_Flag = FEC_Flag
+        self.SEC_Flag = SEC_Flag
+        self.key = bytes()
+
+        # If SEC_Flag and password are set, generate a key using SHA256 encryption
+        if SEC_Flag and password:
+            self.key = SHA256.new(password.encode()).digest()
+            logger.debug("Generated key: %s, length: %s", self.key, len(self.key))
+
         self.output_camera = output_camera
         if self.output_camera:
             self.set_up_camera()
 
-    def set_up_camera(self):
-        self.cam = pyvirtualcam.Camera(
-            width=self.res_w,
-            height=self.res_h,
-            fps=self.fps,
-            fmt=pyvirtualcam.PixelFormat.BGR,
-            print_fps=False,
+        # Configure logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s]: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
 
-    def check_valid_data(self, data, CRC):
-        logging.debug("{} | {}".format(CRC, binascii.crc32(data)))
-        return CRC == binascii.crc32(data)
-
-    def decode_frame(self, data):
-        """decodes the data from bytes to a frame
-
-        :param data: encoded frame
-        :type data: bytes
+    def set_up_camera(self):
         """
-        data = np.frombuffer(data, dtype=np.uint8)
-        return cv2.imdecode(data, 1)
+        Set up the camera with specified settings.
+        """
+
+        try:
+            # Set up the camera with specified settings
+            self.cam = pyvirtualcam.Camera(
+                width=self.res_w,
+                height=self.res_h,
+                fps=self.fps,
+                fmt=pyvirtualcam.PixelFormat.BGR,
+                print_fps=False,
+            )
+        except Exception as ex:
+            logger.exception("Failed to set up camera: %s", ex)
 
     def send_frame_to_camera(self, frame):
+        """
+        Send the frame to the camera or display it in a window.
+
+        Args:
+            frame (numpy.ndarray): Frame to be sent or displayed.
+        """
+
         try:
             if not self.output_camera:
-                cv2.imshow("Perview {}".format(self.port), frame)
+                # Display the frame in a window
+                cv2.imshow("Preview {}".format(self.port), frame)
                 cv2.waitKey(1)
             else:
+                # Send the frame to the virtual camera
                 self.cam.send(frame)
-        # self.cam.sleep_until_next_frame()
         except Exception as ex:
-            logging.critical(ex)
+            logger.exception("Failed to send frame to camera: %s", ex)
             exit()
 
-    def exit(self, *args, **kargs):
-        if self.output_camera:
-            self.cam.close()
-        self.lock.acquire()
-        self.RUN = False
-        self.agent.stop_receive()
-        self.lock.release()
-        self.tcp_sock.close()
-        self.udp_sock.close()
+    def decode_frame(self, data):
+        """
+        Decode the data from bytes to a frame.
 
-        self.receive_thread.join()
+        Args:
+            data (bytes): Encoded frame.
+
+        Returns:
+            numpy.ndarray: Decoded frame.
+        """
+
+        try:
+            data = np.frombuffer(data, dtype=np.uint8)
+            return cv2.imdecode(data, 1)
+        except Exception as ex:
+            logger.exception("Failed to decode frame: %s", ex)
+            return None
+
+    def exit(self, *args, **kargs):
+        """
+        Cleanup and exit the client.
+        """
+
+        try:
+            if self.output_camera:
+                self.cam.close()
+            self.lock.acquire()
+            self.RUN = False
+            self.agent.stop_receive()
+            self.lock.release()
+            self.tcp_sock.close()
+            self.udp_sock.close()
+
+            self.receive_thread.join()
+        except Exception as ex:
+            logger.exception("Failed to exit: %s", ex)
 
     def receive_loop(self):
-        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.udp_sock.settimeout(5)
+        """
+        Main loop to receive frames and process them.
+        """
 
-        self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.tcp_sock.connect(self.addr)
+        try:
+            # Set up UDP and TCP sockets
+            self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.udp_sock.settimeout(5)
 
-        self.port = self.tcp_sock.recv(16).decode()
-        self.udp_sock.bind(("0.0.0.0", int(self.port)))
+            self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.tcp_sock.connect(self.addr)
 
-        self.agent = Agent(self.udp_sock, self.tcp_sock, self.addr, fps=self.fps)
-        self.receive_thread = Thread(target=self.agent.start_receive)
-        self.receive_thread.start()
+            # Receive the port from the TCP socket and bind the UDP socket
+            self.port = self.tcp_sock.recv(16).decode()
+            self.udp_sock.bind(("0.0.0.0", int(self.port)))
 
-        logger.info("Starting analytics thread")
-        self.analytics_thread = Thread(target=self.print_analytics)
-        self.analytics_thread.start()
-        logger.info("Started analytics thread")
+            # Set up the agent for receiving data
+            self.agent = Agent(
+                self.udp_sock,
+                self.tcp_sock,
+                self.addr,
+                fps=self.fps,
+                SEC_flag=self.SEC_Flag,
+                key=self.key,
+            )
+            self.receive_thread = Thread(target=self.agent.start_receive)
+            self.receive_thread.start()
 
-        sleep_time = 1.0 / self.fps  # TODO: change to var
+            logger.info("Starting analytics thread")
+            self.analytics_thread = Thread(target=self.print_analytics)
+            self.analytics_thread.start()
+            logger.info("Started analytics thread")
 
-        while self.RUN:
-            data, serial = self.agent.get_last_data()
-            logger.debug("Got last data - {}".format(serial))
-            frame = data.get_data()
-            if not frame:
-                time.sleep(sleep_time / 10)
-                continue
-            logger.debug("Received {}".format(data))
-            self.send_frame_to_camera(self.decode_frame(frame))
-            # time.sleep(sleep_time)
+            sleep_time = 1.0 / self.fps
+
+            while self.RUN:
+                # Get the last received data and process the frame
+                data, serial = self.agent.get_last_data()
+                logger.debug("Got last data - %s", serial)
+                frame = data.get_data()
+                if not frame:
+                    time.sleep(sleep_time / 10)
+                    continue
+                logger.debug("Received %s", data)
+                self.send_frame_to_camera(self.decode_frame(frame))
+        except Exception as ex:
+            logger.exception("Error in receive loop: %s", ex)
 
     def print_analytics(self):
-        sleep_time = 5.0
-        while self.RUN:
-            time.sleep(sleep_time)
-            analytics = self.agent.get_analytics()
-            print(
-                "Receive FPS: {}".format(analytics.get_frames_received() / sleep_time)
-            )
-            print("Actual FPS: {}".format(analytics.get_good_frames() / sleep_time))
-            print(
-                "Bitrate: {} Mbps".format(
-                    analytics.get_bits_received() / sleep_time / 1000000
-                )
-            )
-            print("PPS: {}".format(analytics.get_packets_received() / sleep_time))
-            print("CRC Error Percentage: {}%".format(analytics.get_packet_CRC_error()))
-            print("CRC Errors: {}".format(analytics.get_packet_CRC()))
-            print("")
-            analytics.reset()
+        """
+        Print analytics information periodically.
+        """
 
-            # if not self.agent.is_alive():
-            # self.exit()
+        try:
+            sleep_time = 5.0
+            while self.RUN:
+                time.sleep(sleep_time)
+                analytics = self.agent.get_analytics()
+                logger.info(
+                    "Receive FPS: %s", analytics.get_frames_received() / sleep_time
+                )
+                logger.info("Actual FPS: %s", analytics.get_good_frames() / sleep_time)
+                logger.info(
+                    "Bitrate: %s Mbps",
+                    analytics.get_bits_received() / sleep_time / 1000000,
+                )
+                logger.info("PPS: %s", analytics.get_packets_received() / sleep_time)
+                logger.info(
+                    "CRC Error Percentage: %s%%", analytics.get_packet_CRC_error()
+                )
+                logger.info("CRC Errors: %s", analytics.get_packet_CRC())
+                logger.info("")
+                analytics.reset()
+        except Exception as ex:
+            logger.exception("Failed to print analytics: %s", ex)
 
 
 def main():
-    """
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    # create formatter
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-
-    # add formatter to ch
-    ch.setFormatter(formatter)
-
-    fh_DEBUG = logging.handlers.RotatingFileHandler("client_debug.log")
-    fh_DEBUG.setLevel(logging.DEBUG)
-
-    fh_INFO = logging.handlers.RotatingFileHandler("client.log")
-    fh_INFO.setLevel(logging.INFO)
-
-    # add ch to logger
-    logger.addHandler(ch)
-    logger.addHandler(fh_DEBUG)
-    logger.addHandler(fh_INFO)
-    """
     cli = Client()
     signal.signal(signal.SIGINT, cli.exit)
     cli.receive_loop()

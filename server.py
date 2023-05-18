@@ -6,6 +6,7 @@ import signal
 import time
 import keyboard
 from threading import Thread, Lock
+from Crypto.Hash import SHA256
 from protocol import Agent, Data, Analytics
 
 
@@ -15,26 +16,51 @@ logger = logging.getLogger(__name__)
 
 class ServerService:
     def __init__(
-        self, cam_id=0, fps=15, res_h=720, res_w=1280, compress_quailty=50, RUN=True
+        self,
+        cam_id=0,
+        fps=15,
+        res_h=720,
+        res_w=1280,
+        compress_quality=50,
+        RUN=True,
+        FEC_Flag=False,
+        SEC_False=False,
+        password=None,
     ):
-        self.cam = cv2.VideoCapture(cam_id)  # cam = cv2.VideoCapture(0)
-        self.cam.set(
-            cv2.CAP_PROP_FRAME_WIDTH, 1920
-        )  # cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        self.cam.set(
-            cv2.CAP_PROP_FRAME_HEIGHT, 1080
-        )  # cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-        self.cam.set(cv2.CAP_PROP_FPS, 30)  # cam.set(cv2.CAP_PROP_FPS, 30)
-        print(self.cam.get(cv2.CAP_PROP_FPS))
+        """
+        Initializes the ServerService class.
 
-        self.encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), compress_quailty]
+        Args:
+            cam_id (int): Camera ID.
+            fps (int): Frames per second.
+            res_h (int): Frame height.
+            res_w (int): Frame width.
+            compress_quality (int): JPEG compression quality.
+            RUN (bool): Flag indicating if the server is running.
+            FEC_Flag (bool): Flag indicating if Forward Error Correction is enabled.
+            SEC_False (bool): Flag indicating if Secure Communication is enabled.
+            password (str): Password for secure communication.
+        """
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s]: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+
+        self.cam = cv2.VideoCapture(cam_id)
+        self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        self.cam.set(cv2.CAP_PROP_FPS, 30)
+        logger.info("Camera FPS: {}".format(self.cam.get(cv2.CAP_PROP_FPS)))
+
+        self.encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), compress_quality]
 
         self.RUN = RUN
         self.lock = Lock()
 
         self.fps = fps
         self.frame_devider = round(30 / self.fps)
-        print("devider: {}".format(self.frame_devider))
+        logger.info("Frame Divider: {}".format(self.frame_devider))
         self.res_w = res_w
         self.res_h = res_h
 
@@ -51,19 +77,31 @@ class ServerService:
         self.TCP_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.TCP_sock.bind(self.local_addr)
 
-        self.FEC_flag = False
-        self.SEC_flag = False
+        self.FEC_flag = FEC_Flag
+        self.SEC_flag = SEC_False
+
+        self.key = None
+
+        if self.SEC_flag and password:
+            self.key = SHA256.new(password.encode()).digest()
+            logger.info("Key: {} (Length: {})".format(self.key, len(self.key)))
 
         self.analytics_thread = Thread(target=self.print_analytics)
         self.analytics_thread.start()
 
     def start(self):
+        """
+        Starts the server by launching capture thread and starting the listener.
+        """
         self.capture_thread = Thread(target=self.capture)
         self.capture_thread.start()
 
         self.start_listener()
 
     def start_listener(self):
+        """
+        Starts the TCP listener to accept client connections.
+        """
         self.TCP_sock.listen(5)
         while self.RUN:
             try:
@@ -74,17 +112,28 @@ class ServerService:
             client_sock.setblocking(False)
             client_sock.send(str(addr[1]).encode())
 
-            print("Client connected from {}".format(addr))
-            print("{} Clients connected".format(len(self.agents) + 1))
+            logger.info("Client connected from {}".format(addr))
+            logger.info("{} Clients connected".format(len(self.agents) + 1))
 
-            agent = Agent(self.UDP_sock, client_sock, addr, self.fps)
+            agent = Agent(
+                self.UDP_sock,
+                client_sock,
+                addr,
+                fps=self.fps,
+                FEC_flag=self.FEC_flag,
+                key=self.key,
+                SEC_flag=self.SEC_flag,
+            )
 
             self.lock.acquire()
             self.agents.append(agent)
             self.lock.release()
 
-    def stop(self, sig=None, farme=None):
-        print("Stopping")
+    def stop(self, sig=None, frame=None):
+        """
+        Stops the server and releases resources.
+        """
+        logger.info("Stopping")
         self.lock.acquire()
         self.RUN = False
         self.lock.release()
@@ -94,32 +143,14 @@ class ServerService:
         self.TCP_sock.close()
 
         self.lock.acquire()
-        while self.agents:
-            self.agents.pop()
+        self.agents.clear()
         self.lock.release()
 
-        print("Stopped")
-
-    def handle_client(self, agent):
-        while self.RUN:
-            pass
-
-    def handle_request(self, addr, data):
-        """Handle requests from the listener"""
-        if data == b"START STREAM":
-            print("stast")
-            self.remote_addr = addr
-            self.capture()
+        logger.info("Stopped")
 
     def capture(self):
-        """captures video from the camera
-
-        :param fps: how many frames per second the camera will capture
-        :type fps: int
-        :param res_h: height of the frame
-        :type res_h: int
-        :param res_w: width of the frame
-        :type res_w: int
+        """
+        Captures video from the camera and sends frames to connected agents.
         """
         index = -1
         while self.RUN:
@@ -129,7 +160,12 @@ class ServerService:
 
             if len(self.agents) == 0:
                 continue
-            _, frame = self.cam.read()
+
+            try:
+                _, frame = self.cam.read()
+            except Exception as ex:
+                logger.exception("Error while capturing frame from the camera")
+
             index += 1
             if not index % self.frame_devider == 0:
                 continue
@@ -137,108 +173,95 @@ class ServerService:
             status, data = self.encode_frame(frame)
             if not status:
                 continue
+
             data = Data(data)
-            logger.info("Sending {}".format(data))
+            logger.debug("Sending {}".format(data))
             for_remove = []
             for agent in self.agents:
                 if not agent.is_alive():
                     for_remove.append(agent)
-                agent.send_data(data.clone())
+                try:
+                    agent.send_data(data.clone())
+                except Exception as ex:
+                    logger.exception("Error while sending data to agent")
 
             if len(for_remove) > 0:
                 self.lock.acquire()
-                print("Removing agents: {}".format(for_remove))
+                logger.info("Removing agents: {}".format(for_remove))
                 self.agents = [
                     agent for agent in self.agents if agent not in for_remove
                 ]
                 self.lock.release()
 
     def encode_frame(self, frame):
-        """compress frame to lower quailty
+        """
+        Compresses the frame to lower quality.
 
-        :param frame: cv2 frame
-        :type frame: np array
+        Args:
+            frame (np.array): OpenCV frame.
+
+        Returns:
+            bool: Status indicating if encoding was successful.
+            bytes: Encoded frame data.
         """
         try:
             resized = cv2.resize(frame, (self.res_w, self.res_h), cv2.INTER_AREA)
-
             _, encoded_frame = cv2.imencode(".jpg", resized, self.encode_param)
-            #  tmp = cv2.imdecode(encoded_frame, 1)
-            #  cv2.imshow("Preview Server", tmp)
-            #  cv2.waitKey(1)
             return True, encoded_frame.tobytes()
         except Exception as ex:
-            logger.exception("Error while resizing and encoding")
-
-        return False, b""
+            logger.exception("Error while resizing and encoding frame")
+            return False, b""
 
     def print_analytics(self):
+        """
+        Prints analytics information such as frames sent, packets sent, and bitrate.
+        """
         sleep_time = 5.0
         while self.RUN:
             time.sleep(sleep_time)
             analytics = Analytics()
             for agent in self.agents:
-                data = agent.get_analytics()
-                analytics.add_frames_sent(data.get_frames_sent())
-                analytics.add_packets_sent(data.get_packets_sent())
-                data.reset()
-            print(
-                "Frame Per Second Send Overall: {}".format(
+                try:
+                    data = agent.get_analytics()
+                    analytics.add_frames_sent(data.get_frames_sent())
+                    analytics.add_packets_sent(data.get_packets_sent())
+                    data.reset()
+                except Exception as ex:
+                    logger.exception("Error while retrieving agent analytics")
+
+            logger.info(
+                "Frames Per Second Sent Overall: {}".format(
                     analytics.get_frames_sent() / sleep_time
                 )
             )
             if len(self.agents) > 0:
-                print(
-                    "Frame Per Second Send Average: {}".format(
+                logger.info(
+                    "Frames Per Second Sent Average: {}".format(
                         analytics.get_frames_sent() / sleep_time / len(self.agents)
                     )
                 )
-            print(
-                "Packet Per Second Send Overall: {}".format(
+            logger.info(
+                "Packets Per Second Sent Overall: {}".format(
                     analytics.get_packets_sent() / sleep_time
                 )
             )
             if len(self.agents) > 0:
-                print(
-                    "Packet Per Second Send Average: {}".format(
+                logger.info(
+                    "Packets Per Second Sent Average: {}".format(
                         analytics.get_packets_sent() / sleep_time / len(self.agents)
                     )
                 )
-            print(
+            logger.info(
                 "Bitrate: {} Mbps".format(
                     analytics.get_bits_sent() / sleep_time / 1000000
                 )
             )
-            print("")
+            logger.info("")
             analytics.reset()
 
 
 def main():
-    """
-    sys.stdout = sys.__stdout__
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    # create formatter
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-
-    # add formatter to ch
-    ch.setFormatter(formatter)
-
-    fh_DEBUG = logging.handlers.RotatingFileHandler("server_debug.log")
-    fh_DEBUG.setLevel(logging.DEBUG)
-
-    fh_INFO = logging.handlers.RotatingFileHandler("server.log")
-    fh_INFO.setLevel(logging.INFO)
-
-    # add ch to logger
-    logger.addHandler(ch)
-    logger.addHandler(fh_DEBUG)
-    logger.addHandler(fh_INFO)
-    """
-
-    demo = ServerService()
+    demo = ServerService(password="123456")
 
     signal.signal(signal.SIGINT, demo.stop)
 
